@@ -39,9 +39,12 @@ class OpenAICompatRunner(Runner):
         token_count = 0
         in_think = False
         buf = ""
+        stream = None
 
         try:
             yield RaceEvent(EventKind.START, self.spec.id, 0.0)
+            # Use async-context-managed stream so aclose() runs cleanly even
+            # when the surrounding loop is torn down.
             stream = await client.chat.completions.create(
                 model=self.spec.model,
                 messages=[{"role": "user", "content": prompt}],
@@ -78,6 +81,13 @@ class OpenAICompatRunner(Runner):
                         if head:
                             t = _approx_tokens(head)
                             token_count += t
+                            # Send a TOKEN event so the lane updates progress
+                            # even while thinking — the UI shows the bubble
+                            # but the runner still advances.
+                            yield RaceEvent(
+                                EventKind.TOKEN, self.spec.id,
+                                time.time() - t0, "", token_count,
+                            )
                         in_think = False
                         yield RaceEvent(EventKind.THINK_CLOSE, self.spec.id, time.time() - t0)
                     else:
@@ -87,11 +97,17 @@ class OpenAICompatRunner(Runner):
                 # the game loop receives clean chunks.
                 if buf and (buf[-1].isspace() or len(buf) > 64):
                     if in_think:
-                        # While thinking, increment token count silently
-                        token_count += _approx_tokens(buf)
+                        # While thinking, advance the counter — UI shows
+                        # "thinking" badge but progress still moves slowly.
+                        n = _approx_tokens(buf)
+                        token_count += n
+                        yield RaceEvent(
+                            EventKind.TOKEN, self.spec.id,
+                            time.time() - t0, "", token_count,
+                        )
                     else:
-                        t = _approx_tokens(buf)
-                        token_count += t
+                        n = _approx_tokens(buf)
+                        token_count += n
                         yield RaceEvent(
                             EventKind.TOKEN, self.spec.id,
                             time.time() - t0, buf, token_count,
@@ -100,8 +116,8 @@ class OpenAICompatRunner(Runner):
 
             # Flush trailing buffer
             if buf and not in_think:
-                t = _approx_tokens(buf)
-                token_count += t
+                n = _approx_tokens(buf)
+                token_count += n
                 yield RaceEvent(
                     EventKind.TOKEN, self.spec.id,
                     time.time() - t0, buf, token_count,
@@ -118,4 +134,11 @@ class OpenAICompatRunner(Runner):
                 time.time() - t0, error=f"{type(e).__name__}: {e}",
             )
         finally:
+            # Explicitly close the stream's underlying SSE connection before
+            # the event loop tears the client down.
+            if stream is not None:
+                try:
+                    await stream.close()
+                except Exception:  # noqa: BLE001
+                    pass
             await client.close()

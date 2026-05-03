@@ -38,6 +38,10 @@ class Orchestrator:
         try:
             loop.run_until_complete(self._gather())
         finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
             self._done.set()
             loop.close()
 
