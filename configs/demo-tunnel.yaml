@@ -9,10 +9,10 @@ runners:
     label: "Qwen3-8B AWQ"
     base_url: http://localhost:8001/v1
     model: qwen3-8b
-    sprite: "🚀"
+    sprite: rocket
 
   - id: qwen3-4b
     label: "Qwen3-4B AWQ"
     base_url: http://localhost:8002/v1
     model: qwen3-4b
-    sprite: "🐇"
+    sprite: car

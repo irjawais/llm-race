@@ -1,15 +1,16 @@
-"""Arena — pygame race with emoji characters + animated scene + terminal panel.
+"""Arena — v0.2 "Synthwave devtool" UI.
 
 Layout zones (top → bottom, no overlap):
-- HEADER (80 px): title + prompt + drawais brand + global timer
-- LANE AREA (auto-sized): one card per runner, lane height fits usable space
-- BOTTOM PANEL (240 px): per-runner table + scrolling colored log
+- HEADER (72 px): title + prompt + drawais brand + global timer
+- SCENE (auto): vanishing-point grid + sun disc + horizon + lane cards
+- BOTTOM HUD (236 px): three columns — leaderboard | sparklines | log
 
-Within each lane (left → right, gutters):
-- LEFT GUTTER (220 px): model label + tok/s + token count
-- TRACK (mid): progress bar, dashed scrolling road, sprite, glow trail
-- RIGHT GUTTER (200 px): big tokens counter
-- FINISH STRIP: checkered, between TRACK and RIGHT GUTTER
+Strict rules:
+- One accent in motion per element (HOT_PINK / CYAN / AMBER)
+- Hot-pink reserved for the lead and finish moment only
+- Glow only on the lead-lane border, never on every sprite
+- Pixel-art sprites with token-locked run cycle (sprite frames swap on
+  every TOKEN event so the runner moves *because* of the token).
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ from typing import TYPE_CHECKING
 
 import pygame
 
+from llm_race.game.sprites import render_sprite, resolve_sprite_name
 from llm_race.runners.base import EventKind
 
 if TYPE_CHECKING:
@@ -31,57 +33,64 @@ if TYPE_CHECKING:
     from llm_race.runners.base import RunnerSpec
 
 
-BG_TOP = (8, 6, 18)
-BG_BOT = (28, 8, 48)
-HEADER_BG = (16, 10, 30)
-LANE_BG = (18, 12, 32)
-LANE_BG_ALT = (22, 14, 38)
-TRACK_LINE = (60, 40, 90)
-TRACK_DASH = (140, 100, 200)
-WHITE = (245, 240, 255)
-GREY = (180, 175, 200)
-DIM = (110, 100, 140)
-GREEN_NEON = (52, 224, 156)
-RED_NEON = (255, 92, 130)
-PANEL_BG = (12, 8, 22)
-PANEL_BORDER = (80, 50, 130)
-TERMINAL_FG = (180, 240, 200)
+# ------------------------------------------------------------------ palette
+BG_DEEP = (10, 10, 18)
+BG_PANEL = (20, 20, 31)
+GRID = (42, 27, 61)
+HOT_PINK = (255, 0, 110)
+CYAN = (0, 240, 255)
+AMBER = (255, 190, 11)
+TEXT = (232, 232, 240)
+TEXT_DIM = (130, 124, 156)
+NEUTRAL_BORDER = (36, 36, 52)
+BLACK = (0, 0, 0)
+SUN_TOP = (255, 0, 110)
+SUN_BOT = (255, 190, 11)
+
 
 LANE_COLORS = [
-    (192, 132, 252),
-    (244, 114, 182),
-    (34, 211, 238),
-    (253, 224, 71),
-    (74, 222, 128),
-    (251, 146, 60),
-    (251, 113, 133),
-    (165, 180, 252),
+    (255, 0, 110),    # hot pink
+    (0, 240, 255),    # cyan
+    (255, 190, 11),   # amber
+    (131, 56, 236),   # violet
+    (255, 90, 50),    # orange-red
+    (60, 220, 130),   # mint
+    (255, 130, 200),  # rose
+    (140, 200, 255),  # ice blue
 ]
 
-DEFAULT_EMOJI = ["🚀", "🏎️", "🐎", "🦄", "🐇", "🦊", "🐢", "🦖"]
+DEFAULT_SPRITES = ["rocket", "car", "runner", "dragon", "bot",
+                   "rocket", "car", "runner"]
 
+# ------------------------------------------------------------------ layout
 SCREEN_W = 1440
 SCREEN_H = 900
-HEADER_H = 80
-PANEL_H = 240
+HEADER_H = 72
+PANEL_H = 236
 
-LEFT_GUTTER = 240        # label + tok/s + token count
-RIGHT_GUTTER = 220       # big counter
+LEFT_GUTTER = 220
+RIGHT_GUTTER = 240
 TRACK_LEFT = LEFT_GUTTER
 TRACK_RIGHT = SCREEN_W - RIGHT_GUTTER
 TRACK_LEN = TRACK_RIGHT - TRACK_LEFT
-LANE_PAD_X = 16          # card outer padding from screen edge
+LANE_PAD_X = 20
+
+CARD_RADIUS = 12
 
 
 @dataclass
 class LaneState:
     spec: "RunnerSpec"
     color: tuple[int, int, int]
-    emoji: str = "🚀"
+    sprite_name: str = "runner"
+    sprite_frame: int = 0
+    blink: bool = False
+    blink_until: float = 0.0
     progress: float = 0.0
     velocity: float = 0.0
     target_progress: float = 0.0
     token_count: int = 0
+    last_progress_token: int = 0
     finished: bool = False
     finish_time: float | None = None
     thinking: bool = False
@@ -91,27 +100,11 @@ class LaneState:
     last_token_count: int = 0
     last_tok_time: float = field(default_factory=time.time)
     instant_tps: float = 0.0
+    spark: deque = field(default_factory=lambda: deque(maxlen=64))
+    token_flash_until: float = 0.0
 
 
-def _try_load_emoji_font(size: int) -> pygame.font.Font | None:
-    candidates = [
-        "/System/Library/Fonts/Apple Color Emoji.ttc",
-        "/System/Library/Fonts/Apple Color Emoji.ttf",
-        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
-        "/usr/share/fonts/truetype/twemoji/Twemoji.ttf",
-    ]
-    for p in candidates:
-        if os.path.exists(p):
-            try:
-                f = pygame.font.Font(p, size)
-                surf = f.render("🚀", True, (255, 255, 255))
-                if surf.get_width() > 0:
-                    return f
-            except Exception:
-                continue
-    return None
-
-
+# ------------------------------------------------------------------ Arena
 class Arena:
     def __init__(self, orch: "Orchestrator", target_tokens: int = 1024,
                  prompt_label: str = "build me Tetris in Python") -> None:
@@ -120,50 +113,57 @@ class Arena:
         self.prompt_label = prompt_label
         self.lanes: list[LaneState] = []
         for i, r in enumerate(orch.runners):
-            spr = r.spec.sprite or ""
-            if not spr or spr.startswith("runner_"):
-                emoji = DEFAULT_EMOJI[i % len(DEFAULT_EMOJI)]
-            else:
-                emoji = spr
-            self.lanes.append(
-                LaneState(r.spec, color=LANE_COLORS[i % len(LANE_COLORS)], emoji=emoji)
+            sprite_name = resolve_sprite_name(
+                r.spec.sprite, fallback_index=i,
             )
+            color = LANE_COLORS[i % len(LANE_COLORS)]
+            self.lanes.append(LaneState(r.spec, color=color, sprite_name=sprite_name))
         self.start_time = time.time()
         self.confetti: list[list[float]] = []
+        self.particles: list[list[float]] = []
         self.race_over = False
         self.race_over_at: float | None = None
         self.winner_id: str | None = None
+        self.winner_idx: int | None = None
         self.frame = 0
-        self.terminal_lines: deque[tuple[float, str, tuple[int, int, int]]] = deque(maxlen=12)
-        self._bg_surf: pygame.Surface | None = None
+        self.terminal_lines: deque[tuple[float, str, tuple[int, int, int]]] = deque(maxlen=14)
         self.dash_offset = 0.0
-        self.cloud_offset = 0.0
-        self.emoji_font: pygame.font.Font | None = None
+        self.parallax_offset = 0.0
+        self.shake_until = 0.0
+        self.shake_mag = 0
+        self.lead_idx: int | None = None
+        self.flash_until: float = 0.0
+        self.world_freeze_until: float = 0.0
 
+    # ------------------------------------------------------------- run
     def run(self) -> None:
         os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
         pygame.init()
         self.screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
         pygame.display.set_caption("LLM Race · drawais")
         self.clock = pygame.time.Clock()
-        self.font_title = pygame.font.SysFont("Helvetica", 38, bold=True)
-        self.font_sub = pygame.font.SysFont("Helvetica", 20)
-        self.font_label = pygame.font.SysFont("Helvetica", 22, bold=True)
-        self.font_winner = pygame.font.SysFont("Helvetica", 80, bold=True)
-        self.font_brand = pygame.font.SysFont("Helvetica", 20, bold=True)
-        self.font_big_num = pygame.font.SysFont("Menlo", 38, bold=True)
-        self.font_small_num = pygame.font.SysFont("Menlo", 15, bold=True)
-        self.font_term = pygame.font.SysFont("Menlo", 14)
-        self.font_term_b = pygame.font.SysFont("Menlo", 14, bold=True)
-        self.emoji_font = _try_load_emoji_font(54)
-        self._bg_surf = self._build_background()
+        # Fonts: monospace everywhere. JetBrains Mono if installed, else Menlo.
+        self.font_display = self._mono(28, bold=True)
+        self.font_title = self._mono(28, bold=True)
+        self.font_sub = self._mono(14)
+        self.font_label = self._mono(13, bold=True)
+        self.font_hud = self._mono(12)
+        self.font_hud_b = self._mono(12, bold=True)
+        self.font_num_big = self._mono(28, bold=True)
+        self.font_num_xl = self._mono(46, bold=True)
+        self.font_winner = self._mono(72, bold=True)
+        self.font_chip = self._mono(40, bold=True)
 
-        self._add_log("[boot] arena ready · 60 fps · race armed", TERMINAL_FG)
+        # Pre-render sun disc
+        self._sun_surf = self._build_sun(120)
+        self._grain_surf = self._build_grain(SCREEN_W, SCREEN_H, intensity=0.03)
+        self._vignette_surf = self._build_vignette(SCREEN_W, SCREEN_H, strength=0.20)
+
+        self._add_log("[boot] arena armed · 60 fps", TEXT)
         for lane in self.lanes:
-            tag = lane.emoji + "  " + (lane.spec.label or lane.spec.id)
-            self._add_log(f"[runner] + {tag}", lane.color)
+            self._add_log(f"[runner] + {lane.spec.label or lane.spec.id}", lane.color)
         self.orch.start()
-        self._add_log("[orch] streaming started · waiting for first token...", TERMINAL_FG)
+        self._add_log("[orch] streaming · waiting for first token", TEXT)
 
         running = True
         while running:
@@ -176,22 +176,31 @@ class Arena:
             self.draw()
             pygame.display.flip()
             self.clock.tick(60)
-            if self.race_over and self.race_over_at and time.time() - self.race_over_at > 6.0:
+            if self.race_over and self.race_over_at and time.time() - self.race_over_at > 7.0:
                 running = False
         pygame.quit()
 
-    # -- update -----------------------------------------------------------
+    def _mono(self, size: int, bold: bool = False) -> pygame.font.Font:
+        for name in ("JetBrains Mono", "JetBrainsMono", "Berkeley Mono",
+                     "Menlo", "Monaco", "Courier New"):
+            try:
+                f = pygame.font.SysFont(name, size, bold=bold)
+                if f is not None:
+                    return f
+            except Exception:
+                continue
+        return pygame.font.Font(None, size)
 
+    # ---------------------------------------------------------- update
     def update(self) -> None:
         self.frame += 1
+        if time.time() < self.world_freeze_until:
+            # World motion paused — but UI events still drained
+            self._drain_events()
+            return
         self.dash_offset = (self.dash_offset + 4.5) % 28
-        self.cloud_offset = (self.cloud_offset + 0.4) % SCREEN_W
-        while True:
-            try:
-                ev = self.orch.queue.get_nowait()
-            except Empty:
-                break
-            self._apply(ev)
+        self.parallax_offset = (self.parallax_offset + 1.2) % 24
+        self._drain_events()
 
         now = time.time()
         for lane in self.lanes:
@@ -202,26 +211,59 @@ class Arena:
                     instant = delta / dt
                     lane.rolling.append(instant)
                     lane.instant_tps = sum(lane.rolling) / len(lane.rolling) if lane.rolling else 0.0
+                    lane.spark.append(lane.instant_tps)
                 lane.last_tok_time = now
                 lane.last_token_count = lane.token_count
-            if lane.error or lane.finished:
-                continue
-            diff = lane.target_progress - lane.progress
-            lane.velocity = diff * 0.10
-            lane.progress += lane.velocity
 
-        new_conf = []
-        for c in self.confetti:
-            c[3] += 0.18
-            c[0] += c[2]
-            c[1] += c[3]
-            if c[1] < SCREEN_H + 20:
-                new_conf.append(c)
-        self.confetti = new_conf
+            # eased progress
+            if not (lane.error or lane.finished):
+                diff = lane.target_progress - lane.progress
+                lane.velocity = diff * 0.10
+                lane.progress += lane.velocity
+
+            # blink eyes ~every 2.4s
+            if now > lane.blink_until and not lane.thinking:
+                if random.random() < 0.012:
+                    lane.blink = True
+                    lane.blink_until = now + 0.13
+            elif now > lane.blink_until:
+                lane.blink = False
+
+        # Particles
+        new_particles = []
+        for p in self.particles:
+            p[3] += 0.20
+            p[0] += p[2]
+            p[1] += p[3]
+            p[5] -= p[6]  # life
+            if p[5] > 0 and p[1] < SCREEN_H + 20:
+                new_particles.append(p)
+        self.particles = new_particles
+
+        # Lead detection
+        order = sorted(range(len(self.lanes)),
+                       key=lambda i: (-self.lanes[i].progress, self.lanes[i].spec.id))
+        new_lead = order[0] if self.lanes else None
+        if new_lead is not None and new_lead != self.lead_idx:
+            if self.lead_idx is not None:
+                # screen shake on a lead change (after the first lead is set)
+                self.shake_until = now + 0.12
+                self.shake_mag = 5
+                lead_label = self.lanes[new_lead].spec.label or self.lanes[new_lead].spec.id
+                self._add_log(f"[lead] >>> {lead_label}", HOT_PINK)
+            self.lead_idx = new_lead
 
         if not self.race_over and all(l.finished or l.error for l in self.lanes):
             self.race_over = True
             self.race_over_at = time.time()
+
+    def _drain_events(self) -> None:
+        while True:
+            try:
+                ev = self.orch.queue.get_nowait()
+            except Empty:
+                break
+            self._apply(ev)
 
     def _apply(self, ev) -> None:
         lane = next((l for l in self.lanes if l.spec.id == ev.runner_id), None)
@@ -234,10 +276,13 @@ class Arena:
         if ev.kind == EventKind.TOKEN:
             lane.token_count = ev.token_count
             lane.target_progress = min(1.0, lane.token_count / self.target_tokens)
+            # token-locked sprite frame
+            lane.sprite_frame = (lane.sprite_frame + 1) % 2
+            lane.token_flash_until = time.time() + 0.06
             return
         if ev.kind == EventKind.THINK_OPEN:
             lane.thinking = True
-            self._add_log(f"[{lane.spec.id}] <think> ...", DIM)
+            self._add_log(f"[{lane.spec.id}] <think>", TEXT_DIM)
             return
         if ev.kind == EventKind.THINK_CLOSE:
             lane.thinking = False
@@ -248,146 +293,248 @@ class Arena:
             lane.target_progress = 1.0
             lane.finish_time = ev.elapsed
             self._add_log(
-                f"[{lane.spec.id}] FINISH · {lane.token_count} tokens · {ev.elapsed:.1f}s",
-                GREEN_NEON,
+                f"[{lane.spec.id}] FINISH · {lane.token_count} tok · {ev.elapsed:.1f}s",
+                AMBER,
             )
             if self.winner_id is None:
                 self.winner_id = lane.spec.label or lane.spec.id
-                idx = self.lanes.index(lane)
-                cy = self._lane_y(idx)
-                for _ in range(280):
+                self.winner_idx = self.lanes.index(lane)
+                # Finish moment: world freeze + radial flash + particles
+                now = time.time()
+                self.world_freeze_until = now + 0.6
+                self.flash_until = now + 0.55
+                cx = TRACK_RIGHT
+                cy = self._lane_y(self.winner_idx)
+                for _ in range(40):
+                    angle = random.uniform(0, 2 * math.pi)
+                    speed = random.uniform(2, 6)
+                    color = random.choice([HOT_PINK, CYAN, AMBER])
+                    self.particles.append([
+                        cx, cy,
+                        math.cos(angle) * speed, math.sin(angle) * speed,
+                        color, 0.8, 0.012,
+                    ])
+                # plus confetti to fill space
+                for _ in range(140):
                     self.confetti.append([
-                        TRACK_RIGHT, cy,
+                        cx, cy,
                         random.uniform(-3.5, 3.5),
                         random.uniform(-7.5, -1.0),
-                        random.choice(LANE_COLORS),
+                        random.choice([HOT_PINK, CYAN, AMBER, TEXT]),
                     ])
+                self._add_log(f">>> WINNER {self.winner_id}  ({lane.token_count} tok)", HOT_PINK)
             return
         if ev.kind == EventKind.ERROR:
             lane.error = ev.error
-            self._add_log(f"[{lane.spec.id}] ERROR · {(ev.error or '')[:64]}", RED_NEON)
+            self._add_log(f"[{lane.spec.id}] ERROR · {(ev.error or '')[:80]}", HOT_PINK)
             return
 
     def _add_log(self, line: str, color: tuple[int, int, int]) -> None:
         self.terminal_lines.append((time.time(), line, color))
 
-    # -- layout helpers ---------------------------------------------------
+    # ------------------------------------------------------------- draw
+    def draw(self) -> None:
+        # Background to its own surface so the shake offset moves a single blit
+        scene = pygame.Surface((SCREEN_W, SCREEN_H))
+        self._draw_background(scene)
+        self._draw_header(scene)
+        h = self._lane_height()
+        for i, lane in enumerate(self.lanes):
+            top = HEADER_H + 12 + i * h
+            self._draw_lane(scene, top, h, i, lane)
+        # Confetti on top of lanes
+        for c in self.confetti:
+            c[3] += 0.20
+            c[0] += c[2]
+            c[1] += c[3]
+            if c[1] < SCREEN_H + 20:
+                pygame.draw.rect(scene, c[4], (int(c[0]), int(c[1]), 5, 5))
+        # particles (drawn on top of lanes)
+        for p in self.particles:
+            r = max(1, int(p[5] * 4))
+            pygame.draw.circle(scene, p[4], (int(p[0]), int(p[1])), r)
 
-    def _lane_area_top(self) -> int:
-        return HEADER_H
+        # Bottom HUD
+        self._draw_hud(scene)
 
-    def _lane_area_bot(self) -> int:
-        return SCREEN_H - PANEL_H
+        # Flash overlay when winner just declared
+        if time.time() < self.flash_until:
+            t = (self.flash_until - time.time()) / 0.55
+            alpha = int(t * 110)
+            flash = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+            flash.fill((*HOT_PINK, alpha))
+            scene.blit(flash, (0, 0))
 
+        # Winner banner + 1ST chip
+        if self.winner_id is not None:
+            self._draw_winner(scene)
+
+        # Vignette + grain post-FX
+        scene.blit(self._vignette_surf, (0, 0))
+        scene.blit(self._grain_surf, (0, 0))
+
+        # Screen-shake offset
+        ox = oy = 0
+        if time.time() < self.shake_until:
+            ox = random.randint(-self.shake_mag, self.shake_mag)
+            oy = random.randint(-self.shake_mag, self.shake_mag)
+        self.screen.fill(BG_DEEP)
+        self.screen.blit(scene, (ox, oy))
+
+    # -- background scene ------------------------------------------------
+    def _draw_background(self, surf: pygame.Surface) -> None:
+        surf.fill(BG_DEEP)
+        # vanishing-point grid (drawn into scene area only)
+        scene_top = HEADER_H
+        scene_bot = SCREEN_H - PANEL_H
+        # horizon ~30% from scene top
+        horizon_y = scene_top + int((scene_bot - scene_top) * 0.30)
+        # sun disc
+        sx = SCREEN_W // 2
+        sun_w, sun_h = self._sun_surf.get_size()
+        surf.blit(self._sun_surf, (sx - sun_w // 2, horizon_y - sun_h + 10))
+        # horizon line — the only loud thing in the back
+        pygame.draw.line(surf, HOT_PINK, (0, horizon_y), (SCREEN_W, horizon_y), 1)
+        # vertical lines fan out from vanishing point
+        vp = (sx, horizon_y)
+        for i in range(-12, 13):
+            x_bottom = sx + int(i * (SCREEN_W / 12))
+            pygame.draw.line(surf, GRID, vp, (x_bottom, scene_bot), 1)
+        # horizontal lines below horizon, parallax
+        ofs = self.parallax_offset
+        n_rows = 14
+        for j in range(1, n_rows + 1):
+            t = (j + (ofs / 24)) / n_rows
+            y = horizon_y + int((scene_bot - horizon_y) * (t * t))
+            if y > scene_bot:
+                continue
+            pygame.draw.line(surf, GRID, (0, y), (SCREEN_W, y), 1)
+
+    def _build_sun(self, radius: int) -> pygame.Surface:
+        size = radius * 2
+        s = pygame.Surface((size, size), pygame.SRCALPHA)
+        for r in range(radius, 0, -1):
+            t = r / radius
+            col = (
+                int(SUN_TOP[0] * (1 - t) + SUN_BOT[0] * t),
+                int(SUN_TOP[1] * (1 - t) + SUN_BOT[1] * t),
+                int(SUN_TOP[2] * (1 - t) + SUN_BOT[2] * t),
+            )
+            alpha = int(120 * (1 - t * 0.6))
+            pygame.draw.circle(s, (*col, alpha), (radius, radius), r)
+        return s
+
+    def _build_grain(self, w: int, h: int, intensity: float = 0.03) -> pygame.Surface:
+        s = pygame.Surface((w, h), pygame.SRCALPHA)
+        rng = random.Random(0xCAFE)
+        density = int(w * h * intensity)
+        for _ in range(density):
+            x = rng.randint(0, w - 1)
+            y = rng.randint(0, h - 1)
+            v = rng.randint(20, 60)
+            s.set_at((x, y), (v, v, v, 30))
+        return s
+
+    def _build_vignette(self, w: int, h: int, strength: float = 0.20) -> pygame.Surface:
+        s = pygame.Surface((w, h), pygame.SRCALPHA)
+        cx, cy = w / 2, h / 2
+        max_d = math.hypot(cx, cy)
+        for y in range(0, h, 4):
+            for x in range(0, w, 4):
+                d = math.hypot(x - cx, y - cy) / max_d
+                a = int(255 * strength * (d ** 2.4))
+                pygame.draw.rect(s, (0, 0, 0, a), (x, y, 4, 4))
+        return s
+
+    # -- header ----------------------------------------------------------
+    def _draw_header(self, surf: pygame.Surface) -> None:
+        pygame.draw.rect(surf, BG_DEEP, (0, 0, SCREEN_W, HEADER_H))
+        pygame.draw.line(surf, HOT_PINK, (0, HEADER_H - 1), (SCREEN_W, HEADER_H - 1), 1)
+        title = self.font_title.render("LLM RACE", True, TEXT)
+        surf.blit(title, (28, 22))
+        # accent dot
+        pygame.draw.circle(surf, HOT_PINK, (28 + title.get_width() + 16, 38), 4)
+        sub_text = self.prompt_label[:80]
+        sub = self.font_sub.render(sub_text, True, TEXT_DIM)
+        surf.blit(sub, (28 + title.get_width() + 30, 32))
+        brand = self.font_label.render("drawais", True, HOT_PINK)
+        surf.blit(brand, (SCREEN_W - 24 - brand.get_width(), 18))
+        elapsed = time.time() - self.start_time
+        host = self.font_hud.render(
+            f"target {self.target_tokens}t  ·  elapsed {elapsed:5.1f}s",
+            True, TEXT_DIM,
+        )
+        surf.blit(host, (SCREEN_W - 24 - host.get_width(), 44))
+
+    # -- lane card -------------------------------------------------------
     def _lane_height(self) -> int:
         n = max(1, len(self.lanes))
-        usable = self._lane_area_bot() - self._lane_area_top() - 24
-        # clamp lane height between 96 and 160; if lanes don't fit, shrink
-        return max(80, min(160, usable // n))
+        usable = (SCREEN_H - PANEL_H) - HEADER_H - 24
+        return max(80, min(140, usable // n))
 
     def _lane_y(self, i: int) -> int:
         h = self._lane_height()
-        top = self._lane_area_top() + 12 + i * h
-        return top + h // 2
+        return HEADER_H + 12 + i * h + h // 2
 
-    # -- draw -------------------------------------------------------------
-
-    def draw(self) -> None:
-        if self._bg_surf is not None:
-            self.screen.blit(self._bg_surf, (0, 0))
-        else:
-            self.screen.fill(BG_TOP)
-        self._draw_clouds()
-
-        # Header
-        pygame.draw.rect(self.screen, HEADER_BG, (0, 0, SCREEN_W, HEADER_H))
-        pygame.draw.line(self.screen, PANEL_BORDER, (0, HEADER_H - 1),
-                         (SCREEN_W, HEADER_H - 1), 1)
-        title = self.font_title.render("LLM RACE", True, WHITE)
-        self.screen.blit(title, (24, 18))
-        sub = self.font_sub.render("// " + self.prompt_label[:80], True, GREY)
-        self.screen.blit(sub, (24 + title.get_width() + 16, 30))
-        brand = self.font_brand.render("drawais", True, LANE_COLORS[0])
-        self.screen.blit(brand, (SCREEN_W - 22 - brand.get_width(), 14))
-        host = self.font_small_num.render(
-            f"target {self.target_tokens} tok  ·  elapsed {time.time() - self.start_time:5.1f}s",
-            True, DIM,
-        )
-        self.screen.blit(host, (SCREEN_W - 22 - host.get_width(), 44))
-
-        # Lanes
-        h = self._lane_height()
-        for i, lane in enumerate(self.lanes):
-            top = self._lane_area_top() + 12 + i * h
-            self._draw_lane(top, h, lane)
-
-        for c in self.confetti:
-            pygame.draw.rect(self.screen, c[4], (int(c[0]), int(c[1]), 5, 5))
-
-        self._draw_panel()
-
-        if self.winner_id is not None:
-            self._draw_winner()
-
-    def _build_background(self) -> pygame.Surface:
-        surf = pygame.Surface((SCREEN_W, SCREEN_H))
-        for y in range(SCREEN_H):
-            t = y / SCREEN_H
-            r = int(BG_TOP[0] + (BG_BOT[0] - BG_TOP[0]) * t)
-            g = int(BG_TOP[1] + (BG_BOT[1] - BG_TOP[1]) * t)
-            b = int(BG_TOP[2] + (BG_BOT[2] - BG_TOP[2]) * t)
-            pygame.draw.line(surf, (r, g, b), (0, y), (SCREEN_W, y))
-        for y in range(0, SCREEN_H, 32):
-            for x in range(0, SCREEN_W, 32):
-                surf.set_at((x, y), (38, 24, 60))
-        rng = random.Random(42)
-        for _ in range(120):
-            x = rng.randint(0, SCREEN_W - 1)
-            y = rng.randint(0, HEADER_H)
-            c = rng.choice([(180, 160, 220), (220, 200, 240), (140, 120, 200)])
-            pygame.draw.circle(surf, c, (x, y), 1)
-        return surf
-
-    def _draw_clouds(self) -> None:
-        ofs = self.cloud_offset
-        for cx, cy, r in [(200, 50, 60), (700, 30, 80), (1100, 60, 70)]:
-            x = (cx - ofs) % (SCREEN_W + 200) - 100
-            blob = pygame.Surface((r * 4, r * 2), pygame.SRCALPHA)
-            pygame.draw.ellipse(blob, (60, 40, 90, 60), (0, 0, r * 4, r * 2))
-            self.screen.blit(blob, (int(x), cy))
-
-    def _draw_lane(self, top: int, lane_h: int, lane: LaneState) -> None:
-        idx = self.lanes.index(lane)
-        card_color = LANE_BG if (idx % 2 == 0) else LANE_BG_ALT
+    def _draw_lane(self, surf: pygame.Surface, top: int, lane_h: int,
+                   idx: int, lane: LaneState) -> None:
+        is_lead = (self.lead_idx == idx) and not lane.finished and not lane.error
         card_x = LANE_PAD_X
         card_y = top
         card_w = SCREEN_W - 2 * LANE_PAD_X
         card_h = lane_h - 8
-        card_rect = pygame.Rect(card_x, card_y, card_w, card_h)
-        pygame.draw.rect(self.screen, card_color, card_rect, border_radius=18)
-        # Active border tint when lane has progress AND not finished
-        border = lane.color if (lane.progress > 0.01 and not lane.finished and not lane.error) else PANEL_BORDER
+        rect = pygame.Rect(card_x, card_y, card_w, card_h)
+        pygame.draw.rect(surf, BG_PANEL, rect, border_radius=CARD_RADIUS)
+        # Border
         if lane.finished:
-            border = GREEN_NEON
-        pygame.draw.rect(self.screen, border, card_rect, width=1, border_radius=18)
+            border = AMBER
+        elif lane.error:
+            border = HOT_PINK
+        elif is_lead:
+            # lead glow — only place glow is allowed
+            for k in range(8, 0, -2):
+                glow_rect = pygame.Rect(card_x - k, card_y - k,
+                                        card_w + k * 2, card_h + k * 2)
+                a = max(0, 50 - k * 4)
+                glow = pygame.Surface((glow_rect.w, glow_rect.h), pygame.SRCALPHA)
+                pygame.draw.rect(glow, (*HOT_PINK, a), glow.get_rect(),
+                                 width=2, border_radius=CARD_RADIUS + k)
+                surf.blit(glow, glow_rect.topleft)
+            border = HOT_PINK
+        else:
+            border = NEUTRAL_BORDER
+        pygame.draw.rect(surf, border, rect,
+                         width=2 if is_lead or lane.finished else 1,
+                         border_radius=CARD_RADIUS)
 
         mid = card_y + card_h // 2
 
-        # ---- LEFT GUTTER (label + tps + tokens) ----
-        # use 3 rows positioned absolutely from card top
-        label = (lane.spec.label or lane.spec.id)[:22]
-        label_surf = self.font_label.render(label, True, lane.color)
-        self.screen.blit(label_surf, (card_x + 16, card_y + 14))
-        tps_surf = self.font_small_num.render(f"{lane.instant_tps:5.1f} tok/s", True, GREY)
-        self.screen.blit(tps_surf, (card_x + 16, card_y + 14 + 30))
-        tc_surf = self.font_small_num.render(f"{lane.token_count:>4d} tok", True, lane.color)
-        self.screen.blit(tc_surf, (card_x + 16, card_y + 14 + 30 + 22))
+        # ---- LEFT GUTTER ----
+        label = (lane.spec.label or lane.spec.id)[:20]
+        label_color = HOT_PINK if is_lead else (AMBER if lane.finished else lane.color)
+        label_surf = self.font_label.render(label, True, label_color)
+        surf.blit(label_surf, (card_x + 14, card_y + 12))
+        # status chip
+        status, status_color = self._status_for(lane, is_lead)
+        chip_surf = self.font_hud_b.render(status, True, status_color)
+        chip_x = card_x + 14
+        chip_y = card_y + 30
+        chip_w = chip_surf.get_width() + 10
+        pygame.draw.rect(surf, (28, 28, 42), (chip_x, chip_y, chip_w, 16),
+                         border_radius=4)
+        pygame.draw.rect(surf, status_color, (chip_x, chip_y, chip_w, 16),
+                         width=1, border_radius=4)
+        surf.blit(chip_surf, (chip_x + 5, chip_y + 1))
+        # tokens (small)
+        tok_str = f"{lane.token_count} tok"
+        surf.blit(self.font_hud.render(tok_str, True, TEXT_DIM),
+                  (card_x + 14, card_y + 50))
 
-        # ---- TRACK ----
+        # ---- TRACK BED ----
         track_y = mid + lane_h // 8
-        pygame.draw.line(self.screen, TRACK_LINE, (TRACK_LEFT, track_y),
-                         (TRACK_RIGHT, track_y), 3)
-        # Animated dashes
+        # base line
+        pygame.draw.line(surf, GRID, (TRACK_LEFT, track_y), (TRACK_RIGHT, track_y), 2)
+        # animated dashes
         dash_len = 14
         gap = 14
         period = dash_len + gap
@@ -396,188 +543,249 @@ class Arena:
             seg_left = max(TRACK_LEFT, x0)
             seg_right = min(TRACK_RIGHT, x0 + dash_len)
             if seg_right > seg_left:
-                pygame.draw.line(self.screen, TRACK_DASH, (seg_left, track_y),
-                                 (seg_right, track_y), 3)
+                pygame.draw.line(surf, lane.color, (seg_left, track_y),
+                                 (seg_right, track_y), 2)
             x0 += period
 
-        # Progress bar above track
+        # progress bar above track
         fill_w = int(lane.progress * TRACK_LEN)
-        bar_h = 7
-        bar_y = track_y - 22
-        pygame.draw.rect(self.screen, (28, 16, 44),
-                         (TRACK_LEFT, bar_y, TRACK_LEN, bar_h), border_radius=4)
+        bar_h = 5
+        bar_y = track_y - 18
+        pygame.draw.rect(surf, (28, 28, 42),
+                         (TRACK_LEFT, bar_y, TRACK_LEN, bar_h), border_radius=2)
         if fill_w > 0:
-            pygame.draw.rect(self.screen, lane.color,
-                             (TRACK_LEFT, bar_y, fill_w, bar_h), border_radius=4)
+            bar_color = HOT_PINK if is_lead else lane.color
+            pygame.draw.rect(surf, bar_color,
+                             (TRACK_LEFT, bar_y, fill_w, bar_h), border_radius=2)
 
-        # Start vertical line
-        pygame.draw.line(self.screen, (220, 220, 220),
+        # start vertical line
+        pygame.draw.line(surf, TEXT_DIM,
                          (TRACK_LEFT - 4, card_y + 12),
-                         (TRACK_LEFT - 4, card_y + card_h - 12), 2)
-        # Finish: small checker column right at TRACK_RIGHT (inside track)
+                         (TRACK_LEFT - 4, card_y + card_h - 12), 1)
+        # finish strip — checker
         for ny in range(card_y + 12, card_y + card_h - 12, 8):
             for k in range(2):
-                col = WHITE if (((ny // 8) + k) % 2 == 0) else (10, 10, 10)
-                pygame.draw.rect(self.screen, col,
+                col = TEXT if (((ny // 8) + k) % 2 == 0) else BLACK
+                pygame.draw.rect(surf, col,
                                  (TRACK_RIGHT + 2 + k * 8, ny, 8, 8))
 
         # ---- SPRITE ----
-        sprite_x = TRACK_LEFT + int(lane.progress * TRACK_LEN)
+        sx = TRACK_LEFT + int(lane.progress * TRACK_LEN)
+        sy = mid
         if lane.error:
-            err = self.font_label.render("DNF", True, RED_NEON)
-            self.screen.blit(err, (sprite_x - 22, mid - 14))
+            err = self.font_label.render("DNF", True, HOT_PINK)
+            surf.blit(err, (sx - 22, mid - 10))
         else:
-            self._draw_sprite(sprite_x, mid, lane)
+            self._draw_sprite(surf, sx, sy, lane, idx)
 
-        # ---- RIGHT GUTTER (big tokens counter) ----
-        # Counter is in the right gutter zone (TRACK_RIGHT + 24 .. SCREEN_W - 24)
-        # so it never overlaps with track or sprite.
-        gutter_left = TRACK_RIGHT + 24 + 18  # past the checker strip
-        gutter_right = SCREEN_W - 24
-        big_color = GREEN_NEON if lane.finished else (lane.color if not lane.thinking else DIM)
-        big_n = self.font_big_num.render(f"{lane.token_count:>4d}", True, big_color)
-        # right-align inside gutter
-        bx = gutter_right - big_n.get_width()
-        # clamp inside gutter
-        if bx < gutter_left:
-            bx = gutter_left
-        by = card_y + 14
-        self.screen.blit(big_n, (bx, by))
-        unit = self.font_small_num.render("tokens", True, GREY)
-        ux = gutter_right - unit.get_width()
-        self.screen.blit(unit, (ux, by + big_n.get_height() + 2))
+        # ---- RIGHT GUTTER (sparkline + tps) ----
+        gutter_left = TRACK_RIGHT + 24 + 18
+        gutter_right = SCREEN_W - 22
+        # sparkline 64x18 at top
+        spark_w = 64
+        spark_h = 16
+        spark_x = gutter_right - spark_w
+        spark_y = card_y + 14
+        self._draw_sparkline(surf, spark_x, spark_y, spark_w, spark_h, lane, is_lead)
+        # tabular tps numerics, big
+        tps_color = HOT_PINK if is_lead else (AMBER if not lane.thinking else TEXT_DIM)
+        tps_text = f"{lane.instant_tps:5.1f}"
+        tps_surf = self.font_num_xl.render(tps_text, True, tps_color)
+        tx = gutter_right - tps_surf.get_width()
+        ty = card_y + card_h - tps_surf.get_height() - 6
+        surf.blit(tps_surf, (tx, ty))
+        unit = self.font_hud.render("tok/s", True, TEXT_DIM)
+        surf.blit(unit, (gutter_right - unit.get_width(), ty + tps_surf.get_height() - 18))
 
-    def _draw_sprite(self, x: int, mid: int, lane: LaneState) -> None:
-        # Speed lines (only when running, not thinking, not finished)
+    def _status_for(self, lane: LaneState, is_lead: bool) -> tuple[str, tuple[int, int, int]]:
+        if lane.error:
+            return ("DNF", HOT_PINK)
+        if lane.finished:
+            return ("DONE", AMBER)
+        if lane.thinking:
+            return ("THINK", CYAN)
+        if is_lead:
+            return ("LEAD", HOT_PINK)
+        return ("RUN", lane.color)
+
+    def _draw_sprite(self, surf: pygame.Surface, x: int, y: int,
+                     lane: LaneState, idx: int) -> None:
+        # token-tick flash: 1-frame cyan outline
+        flash = time.time() < lane.token_flash_until
+        # speed lines (if running and not thinking)
         if not lane.thinking and not lane.finished:
             for i in range(3):
                 phase = (self.frame + i * 7) % 18
-                lx = x - 32 - phase * 4
-                a = max(0, 180 - phase * 12)
-                line = pygame.Surface((28, 2), pygame.SRCALPHA)
+                lx = x - 36 - phase * 4
+                a = max(0, 130 - phase * 9)
+                line = pygame.Surface((26, 2), pygame.SRCALPHA)
                 line.fill((*lane.color, a))
-                self.screen.blit(line, (lx, mid - 10 + i * 8))
+                surf.blit(line, (lx, y - 8 + i * 6))
 
-        # Glow halo (small enough to fit in lane card)
-        halo_size = 80
-        halo = pygame.Surface((halo_size, halo_size), pygame.SRCALPHA)
-        for r in range(36, 8, -4):
-            alpha = max(0, 30 - (36 - r))
-            pygame.draw.circle(halo, (*lane.color, alpha),
-                               (halo_size // 2, halo_size // 2), r)
-        self.screen.blit(halo, (x - halo_size // 2, mid - halo_size // 2))
+        sprite = render_sprite(lane.sprite_name, lane.color,
+                               frame=lane.sprite_frame, blink=lane.blink)
+        rect = sprite.get_rect(center=(x, y))
+        surf.blit(sprite, rect)
+        if flash:
+            outline = pygame.Surface(sprite.get_size(), pygame.SRCALPHA)
+            pygame.draw.rect(outline, (*CYAN, 200), outline.get_rect(), 2)
+            surf.blit(outline, rect)
 
-        # Character
-        bob = int((self.frame // 6 + self.lanes.index(lane) * 3) % 2)
-        sprite_size = 56
-        if self.emoji_font is not None:
-            try:
-                raw = self.emoji_font.render(lane.emoji, True, (255, 255, 255))
-                surf = pygame.transform.smoothscale(raw, (sprite_size, sprite_size))
-                rect = surf.get_rect(center=(x, mid - bob * 2))
-                self.screen.blit(surf, rect)
-            except Exception:
-                self._draw_face(x, mid, lane, bob)
-        else:
-            self._draw_face(x, mid, lane, bob)
-
-        # Thinking bubble — drawn ABOVE the sprite (within card, won't bleed)
+        # Thinking bubble (above sprite, contained)
         if lane.thinking:
-            bx, by = x + 22, mid - 30
-            pygame.draw.circle(self.screen, (255, 255, 255), (bx, by), 14, 2)
-            pygame.draw.circle(self.screen, (255, 255, 255), (bx - 12, by + 11), 4, 1)
-            pygame.draw.circle(self.screen, (255, 255, 255), (bx - 18, by + 17), 2, 1)
-            qmark = self.font_label.render("?", True, WHITE)
-            self.screen.blit(qmark, (bx - 5, by - 12))
+            bx, by = x + 24, y - 28
+            pygame.draw.circle(surf, TEXT, (bx, by), 12, 1)
+            pygame.draw.circle(surf, TEXT, (bx - 12, by + 10), 3, 1)
+            pygame.draw.circle(surf, TEXT, (bx - 18, by + 16), 2, 1)
+            qm = self.font_label.render("?", True, TEXT)
+            surf.blit(qm, (bx - 4, by - 9))
 
-        if lane.finished:
-            star = self.font_label.render("✓", True, GREEN_NEON)
-            self.screen.blit(star, (x + 22, mid - 12))
+    def _draw_sparkline(self, surf: pygame.Surface, x: int, y: int,
+                        w: int, h: int, lane: LaneState, is_lead: bool) -> None:
+        # frame
+        pygame.draw.rect(surf, (28, 28, 42), (x, y, w, h), border_radius=3)
+        if not lane.spark:
+            return
+        vals = list(lane.spark)
+        m = max(vals) or 1.0
+        col = HOT_PINK if is_lead else CYAN
+        n = len(vals)
+        if n < 2:
+            pygame.draw.line(surf, col, (x + 1, y + h - 2), (x + w - 2, y + h - 2), 1)
+            return
+        step = (w - 4) / (n - 1)
+        pts = [(x + 2 + int(i * step),
+                y + h - 2 - int((v / m) * (h - 4)))
+               for i, v in enumerate(vals)]
+        pygame.draw.lines(surf, col, False, pts, 2)
 
-    def _draw_face(self, x: int, mid: int, lane: LaneState, bob: int) -> None:
-        body_y = mid - bob * 2
-        pygame.draw.circle(self.screen, lane.color, (x, body_y), 22)
-        pygame.draw.circle(self.screen, (10, 8, 22), (x - 7, body_y - 4), 3)
-        pygame.draw.circle(self.screen, (10, 8, 22), (x + 7, body_y - 4), 3)
-        pygame.draw.circle(self.screen, WHITE, (x - 6, body_y - 5), 1)
-        pygame.draw.circle(self.screen, WHITE, (x + 8, body_y - 5), 1)
-        pygame.draw.arc(self.screen, (10, 8, 22),
-                        pygame.Rect(x - 8, body_y - 2, 16, 12),
-                        math.pi, 2 * math.pi, 2)
+    # -- bottom HUD ------------------------------------------------------
+    def _draw_hud(self, surf: pygame.Surface) -> None:
+        py = SCREEN_H - PANEL_H
+        # top divider
+        pygame.draw.line(surf, HOT_PINK, (0, py), (SCREEN_W, py), 1)
+        pygame.draw.rect(surf, BG_PANEL, (0, py + 1, SCREEN_W, PANEL_H - 1))
 
-    def _draw_panel(self) -> None:
-        py = SCREEN_H - PANEL_H + 8
-        pygame.draw.rect(self.screen, PANEL_BG,
-                         (16, py, SCREEN_W - 32, PANEL_H - 16), border_radius=14)
-        pygame.draw.rect(self.screen, PANEL_BORDER,
-                         (16, py, SCREEN_W - 32, PANEL_H - 16),
-                         width=1, border_radius=14)
+        # 3 columns
+        col_w = (SCREEN_W - 32 - 32) // 3
+        col_h = PANEL_H - 28
+        col_y = py + 14
 
-        x0 = 32
-        y0 = py + 14
-        head_color = (200, 180, 240)
-        header_y = y0
-        head = self.font_term_b.render(
-            "RUNNER".ljust(20) + "TOK".rjust(7) + "  TPS".rjust(8) +
-            "  TIME".rjust(8) + "  STATUS".rjust(11),
-            True, head_color,
-        )
-        self.screen.blit(head, (x0, header_y))
-        pygame.draw.line(self.screen, PANEL_BORDER,
-                         (x0, header_y + 22), (SCREEN_W // 2 - 16, header_y + 22), 1)
+        # column 1 — leaderboard
+        x1 = 16
+        self._hud_column_header(surf, x1, col_y, "LEADERBOARD")
+        order = sorted(range(len(self.lanes)),
+                       key=lambda i: (-self.lanes[i].progress, self.lanes[i].spec.id))
+        for rank, i in enumerate(order):
+            row_y = col_y + 24 + rank * 28
+            lane = self.lanes[i]
+            # position chip
+            chip = self.font_hud_b.render(f"{rank + 1}", True, BG_DEEP)
+            chip_color = (HOT_PINK if rank == 0 else
+                          (CYAN if rank == 1 else (AMBER if rank == 2 else TEXT_DIM)))
+            pygame.draw.rect(surf, chip_color, (x1, row_y, 22, 20), border_radius=4)
+            cx = x1 + 11 - chip.get_width() // 2
+            cy = row_y + 10 - chip.get_height() // 2
+            surf.blit(chip, (cx, cy))
+            # label
+            label = (lane.spec.label or lane.spec.id)[:20]
+            lab = self.font_hud_b.render(label, True, lane.color)
+            surf.blit(lab, (x1 + 30, row_y + 2))
+            # tps
+            tps = self.font_hud.render(f"{lane.instant_tps:5.1f} tok/s", True, TEXT_DIM)
+            surf.blit(tps, (x1 + 30, row_y + 16))
 
-        elapsed = time.time() - self.start_time
-        for i, lane in enumerate(self.lanes):
-            row_y = header_y + 28 + i * 22
-            label = (lane.spec.label or lane.spec.id)[:18]
-            tok = lane.token_count
-            tps = lane.instant_tps
-            t = lane.finish_time if lane.finished else elapsed
-            if lane.error:
-                status = "DNF"; stcol = RED_NEON
-            elif lane.finished:
-                status = "DONE"; stcol = GREEN_NEON
-            elif lane.thinking:
-                status = "THINK"; stcol = (200, 180, 240)
-            else:
-                status = "RUN"; stcol = lane.color
-            line = f"{label:<20}{tok:>7d}{tps:>7.1f}{t:>7.1f}s   "
-            self.screen.blit(self.font_term.render(line, True, lane.color), (x0, row_y))
-            stx = x0 + self.font_term.size(line)[0]
-            self.screen.blit(self.font_term_b.render(status, True, stcol), (stx, row_y))
+        # column 2 — sparklines
+        x2 = 32 + col_w
+        self._hud_column_header(surf, x2, col_y, "TELEMETRY")
+        # avg tps
+        avg_tps = sum(l.instant_tps for l in self.lanes) / max(1, len(self.lanes))
+        # gap to leader (token count)
+        if len(self.lanes) >= 2:
+            sorted_by_tok = sorted(self.lanes, key=lambda l: -l.token_count)
+            gap = sorted_by_tok[0].token_count - sorted_by_tok[1].token_count
+        else:
+            gap = 0
+        total_tok = sum(l.token_count for l in self.lanes)
+        # mini gauges
+        gauge_y = col_y + 28
+        gauges = [
+            ("avg tok/s", f"{avg_tps:5.1f}", CYAN, avg_tps, 60.0),
+            ("gap (tok)", f"{gap}", AMBER, gap, 200.0),
+            ("total tok", f"{total_tok}", HOT_PINK, total_tok, max(1, self.target_tokens * len(self.lanes))),
+        ]
+        for j, (name, val, color, cur, mx) in enumerate(gauges):
+            row_y = gauge_y + j * 38
+            n_lab = self.font_hud.render(name.upper(), True, TEXT_DIM)
+            surf.blit(n_lab, (x2, row_y))
+            v_lab = self.font_num_big.render(val, True, color)
+            surf.blit(v_lab, (x2 + 110, row_y - 4))
+            # mini bar
+            bar_w = col_w - 200
+            pygame.draw.rect(surf, (28, 28, 42),
+                             (x2 + 0, row_y + 22, bar_w, 4), border_radius=2)
+            pct = max(0.0, min(1.0, cur / max(0.001, mx)))
+            pygame.draw.rect(surf, color,
+                             (x2 + 0, row_y + 22, int(bar_w * pct), 4),
+                             border_radius=2)
 
-        # Right half: log
-        log_x = SCREEN_W // 2 + 16
-        log_y = py + 14
-        head2 = self.font_term_b.render("LOG", True, head_color)
-        self.screen.blit(head2, (log_x, log_y))
-        pygame.draw.line(self.screen, PANEL_BORDER,
-                         (log_x, log_y + 22), (SCREEN_W - 32, log_y + 22), 1)
-        recent = list(self.terminal_lines)[-10:]
+        # column 3 — log
+        x3 = 32 + 2 * col_w + 16
+        self._hud_column_header(surf, x3, col_y, "LOG")
+        recent = list(self.terminal_lines)[-9:]
         line_h = 17
         for j, (t_at, msg, color) in enumerate(recent):
-            ts = self.font_term.render(f"{t_at - self.start_time:6.2f}s", True, DIM)
-            self.screen.blit(ts, (log_x, log_y + 30 + j * line_h))
-            content = self.font_term.render(msg[:96], True, color)
-            self.screen.blit(content, (log_x + 64, log_y + 30 + j * line_h))
+            ts = self.font_hud.render(f"{t_at - self.start_time:5.2f}s", True, TEXT_DIM)
+            surf.blit(ts, (x3, col_y + 24 + j * line_h))
+            content = self.font_hud.render(msg[:80], True, color)
+            surf.blit(content, (x3 + 56, col_y + 24 + j * line_h))
+        # blinking caret
         if (self.frame // 30) % 2 == 0:
-            cy = log_y + 30 + len(recent) * line_h
-            pygame.draw.rect(self.screen, TERMINAL_FG, (log_x + 64, cy + 2, 8, 14))
+            cy = col_y + 24 + len(recent) * line_h
+            pygame.draw.rect(surf, CYAN, (x3 + 56, cy + 2, 7, 12))
 
-    def _draw_winner(self) -> None:
+    def _hud_column_header(self, surf: pygame.Surface, x: int, y: int, text: str) -> None:
+        head = self.font_hud_b.render(text, True, TEXT)
+        surf.blit(head, (x, y))
+        underline_w = 80
+        pygame.draw.rect(surf, HOT_PINK, (x, y + 16, underline_w, 1))
+
+    # -- winner ---------------------------------------------------------
+    def _draw_winner(self, surf: pygame.Surface) -> None:
+        # 1ST chip slides in above winner
+        if self.winner_idx is None:
+            return
+        elapsed_since = time.time() - (self.race_over_at or time.time())
+        slide_t = max(0.0, min(1.0, elapsed_since / 0.6))
+        eased = 1 - (1 - slide_t) ** 3
+        cy = self._lane_y(self.winner_idx) - int(60 * (1 - eased)) - 60
+        cx = TRACK_RIGHT - 30
+        chip_w = 80
+        chip_h = 56
+        pygame.draw.rect(surf, HOT_PINK, (cx, cy, chip_w, chip_h),
+                         border_radius=10)
+        pygame.draw.rect(surf, BG_DEEP, (cx + 3, cy + 3, chip_w - 6, chip_h - 6),
+                         width=1, border_radius=8)
+        chip_text = self.font_chip.render("1ST", True, BG_DEEP)
+        surf.blit(chip_text,
+                  (cx + (chip_w - chip_text.get_width()) // 2,
+                   cy + (chip_h - chip_text.get_height()) // 2))
+
+        # Banner
         if self.race_over_at is None:
             return
-        pulse = 1.0 + 0.10 * math.sin(self.frame * 0.18)
-        msg = "WINNER · " + (self.winner_id or "")
-        text = self.font_winner.render(msg, True, LANE_COLORS[0])
-        w = int(text.get_width() * pulse)
-        h = int(text.get_height() * pulse)
-        scaled = pygame.transform.smoothscale(text, (w, h))
+        # Pulsing bar + winner text, only after the chip arrives
+        if elapsed_since < 0.4:
+            return
+        msg = "WINNER  ·  " + (self.winner_id or "")
+        text = self.font_winner.render(msg, True, HOT_PINK)
+        w = text.get_width()
+        h = text.get_height()
         x = (SCREEN_W - w) // 2
         y = (SCREEN_H - h) // 2 - 80
-        backdrop = pygame.Surface((w + 80, h + 40), pygame.SRCALPHA)
-        backdrop.fill((10, 6, 22, 220))
-        self.screen.blit(backdrop, (x - 40, y - 20))
-        ring = pygame.Rect(x - 40, y - 20, w + 80, h + 40)
-        pygame.draw.rect(self.screen, LANE_COLORS[1], ring, width=2, border_radius=22)
-        self.screen.blit(scaled, (x, y))
+        backdrop = pygame.Surface((w + 80, h + 32), pygame.SRCALPHA)
+        backdrop.fill((10, 6, 22, 230))
+        surf.blit(backdrop, (x - 40, y - 16))
+        ring = pygame.Rect(x - 40, y - 16, w + 80, h + 32)
+        pygame.draw.rect(surf, HOT_PINK, ring, width=2, border_radius=14)
+        surf.blit(text, (x, y))
