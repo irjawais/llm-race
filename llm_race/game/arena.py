@@ -1,4 +1,4 @@
-"""Arena — the pyxel game window.
+"""Arena — pygame race window.
 
 Zero numeric stats by design. The viewer just sees who's ahead.
 - Each runner is a sprite on its own lane.
@@ -8,12 +8,16 @@ Zero numeric stats by design. The viewer just sees who's ahead.
 """
 from __future__ import annotations
 
+import math
+import os
+import random
+import sys
 import time
 from dataclasses import dataclass, field
 from queue import Empty
 from typing import TYPE_CHECKING
 
-import pyxel
+import pygame
 
 from llm_race.runners.base import EventKind
 
@@ -22,35 +26,52 @@ if TYPE_CHECKING:
     from llm_race.runners.base import RunnerSpec
 
 
-# drawais palette: purple #c084fc · pink #f472b6 · cyan #22d3ee · yellow #fde047
-LANE_COLORS = [10, 8, 12, 11, 14, 9, 13, 6]  # pyxel palette indices
-SCREEN_W = 320
-SCREEN_H = 200
-LANE_HEIGHT = 22
-TRACK_LEFT = 24
-TRACK_RIGHT = SCREEN_W - 16
+# drawais palette
+BG = (10, 10, 18)
+BG_GRAD = (28, 12, 44)
+BAR = (24, 16, 40)
+TRACK = (40, 24, 56)
+LANE_LINE = (90, 70, 130)
+LANE_DASH = (180, 130, 230)
+WHITE = (240, 240, 255)
+GREY = (160, 160, 180)
+
+LANE_COLORS = [
+    (192, 132, 252),   # purple
+    (244, 114, 182),   # pink
+    (34, 211, 238),    # cyan
+    (253, 224, 71),    # yellow
+    (74, 222, 128),    # green
+    (251, 146, 60),    # orange
+    (251, 113, 133),   # rose
+    (165, 180, 252),   # indigo
+]
+
+SCREEN_W = 1280
+SCREEN_H = 720
+TOP_BAR_H = 64
+LANE_HEIGHT = 88
+TRACK_LEFT = 96
+TRACK_RIGHT = SCREEN_W - 64
 TRACK_LEN = TRACK_RIGHT - TRACK_LEFT
 
 
 @dataclass
 class LaneState:
     spec: "RunnerSpec"
-    color: int
-    progress: float = 0.0  # 0..1
-    velocity: float = 0.0  # smoothed pixels/frame for animation
+    color: tuple[int, int, int]
+    progress: float = 0.0
+    velocity: float = 0.0
     target_progress: float = 0.0
     token_count: int = 0
     finished: bool = False
     finish_time: float | None = None
     thinking: bool = False
     error: str | None = None
-    # pacing
     last_event_time: float = field(default_factory=time.time)
 
 
 class Arena:
-    """Pyxel game state."""
-
     def __init__(self, orch: "Orchestrator", target_tokens: int = 1024,
                  prompt_label: str = "build me Tetris in Python") -> None:
         self.orch = orch
@@ -62,62 +83,66 @@ class Arena:
         ]
         self.start_time = time.time()
         self.t0 = self.start_time
-        self.confetti: list[tuple[float, float, float, float, int]] = []
+        self.confetti: list[list[float]] = []
         self.race_over = False
         self.race_over_at: float | None = None
         self.winner_id: str | None = None
-        # Frame counter for animation
         self.frame = 0
 
-    # ----- public API ----------------------------------------------------
-
     def run(self) -> None:
-        pyxel.init(SCREEN_W, SCREEN_H, title="LLM Race · drawais",
-                   fps=60, capture_scale=2)
-        self.orch.start()
-        pyxel.run(self.update, self.draw)
+        os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+        pygame.init()
+        self.screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
+        pygame.display.set_caption("LLM Race · drawais")
+        self.clock = pygame.time.Clock()
+        self.font_title = pygame.font.SysFont("Helvetica", 30, bold=True)
+        self.font_sub = pygame.font.SysFont("Helvetica", 18)
+        self.font_label = pygame.font.SysFont("Helvetica", 22, bold=True)
+        self.font_winner = pygame.font.SysFont("Helvetica", 64, bold=True)
+        self.font_brand = pygame.font.SysFont("Helvetica", 16, bold=True)
 
-    # ----- update --------------------------------------------------------
+        self.orch.start()
+        running = True
+        while running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                elif event.type == pygame.KEYDOWN and event.key in (pygame.K_q, pygame.K_ESCAPE):
+                    running = False
+            self.update()
+            self.draw()
+            pygame.display.flip()
+            self.clock.tick(60)
+            if self.race_over and self.race_over_at and time.time() - self.race_over_at > 6.0:
+                running = False
+        pygame.quit()
 
     def update(self) -> None:
         self.frame += 1
-        # Drain queued events
         while True:
             try:
                 ev = self.orch.queue.get_nowait()
             except Empty:
                 break
             self._apply(ev)
-
-        # Smooth motion: ease toward target
         for lane in self.lanes:
             if lane.error or lane.finished:
                 continue
             diff = lane.target_progress - lane.progress
             lane.velocity = diff * 0.08
             lane.progress += lane.velocity
-
-        # Confetti physics
         new_confetti = []
-        for x, y, vx, vy, c in self.confetti:
-            vy += 0.18  # gravity
-            x += vx
-            y += vy
-            if y < SCREEN_H + 8:
-                new_confetti.append((x, y, vx, vy, c))
+        for c in self.confetti:
+            c[3] += 0.18
+            c[0] += c[2]
+            c[1] += c[3]
+            c[5] += c[6]
+            if c[1] < SCREEN_H + 20:
+                new_confetti.append(c)
         self.confetti = new_confetti
-
-        # Race over check: all lanes finished or errored
         if not self.race_over and all(l.finished or l.error for l in self.lanes):
             self.race_over = True
             self.race_over_at = time.time()
-
-        # Auto-quit a few seconds after race is over (for clean screen-record)
-        if self.race_over and self.race_over_at and time.time() - self.race_over_at > 6.0:
-            pyxel.quit()
-
-        if pyxel.btnp(pyxel.KEY_Q) or pyxel.btnp(pyxel.KEY_ESCAPE):
-            pyxel.quit()
 
     def _apply(self, ev) -> None:
         lane = next((l for l in self.lanes if l.spec.id == ev.runner_id), None)
@@ -141,117 +166,154 @@ class Arena:
             lane.target_progress = 1.0
             lane.finish_time = ev.elapsed
             if self.winner_id is None:
-                self.winner_id = lane.spec.id
-                # Burst of confetti for the winner
-                for i in range(80):
-                    import random
-                    x = TRACK_RIGHT
-                    y = self._lane_y(self.lanes.index(lane))
-                    vx = random.uniform(-2.0, 2.0)
-                    vy = random.uniform(-3.0, -0.5)
-                    c = random.choice([8, 9, 10, 11, 12, 14])
-                    self.confetti.append((x, y, vx, vy, c))
+                self.winner_id = lane.spec.label or lane.spec.id
+                idx = self.lanes.index(lane)
+                cy = self._lane_y(idx)
+                for _ in range(220):
+                    self.confetti.append([
+                        TRACK_RIGHT, cy,
+                        random.uniform(-3.5, 3.5),
+                        random.uniform(-7.0, -1.0),
+                        random.choice(LANE_COLORS),
+                        0.0,
+                        random.uniform(-0.1, 0.1),
+                    ])
             return
         if ev.kind == EventKind.ERROR:
             lane.error = ev.error
             return
 
-    # ----- draw ----------------------------------------------------------
-
     def draw(self) -> None:
-        pyxel.cls(0)  # black bg
-        # Top banner
-        pyxel.rect(0, 0, SCREEN_W, 14, 1)
-        title = "LLM RACE"
-        pyxel.text(8, 4, title, 7)
-        sub = self.prompt_label[:48]
-        pyxel.text(8 + len(title) * 4 + 6, 4, "·  " + sub, 13)
-        # drawais logo bottom-right
-        pyxel.text(SCREEN_W - 56, 4, "drawais", 14)
+        # Vertical gradient background
+        for y in range(SCREEN_H):
+            t = y / SCREEN_H
+            r = int(BG[0] + (BG_GRAD[0] - BG[0]) * t)
+            g = int(BG[1] + (BG_GRAD[1] - BG[1]) * t)
+            b = int(BG[2] + (BG_GRAD[2] - BG[2]) * t)
+            pygame.draw.line(self.screen, (r, g, b), (0, y), (SCREEN_W, y))
 
-        # Track surface
-        pyxel.rect(0, 14, SCREEN_W, SCREEN_H - 14, 0)
+        # Top bar
+        pygame.draw.rect(self.screen, BAR, (0, 0, SCREEN_W, TOP_BAR_H))
+        title = self.font_title.render("LLM RACE", True, WHITE)
+        self.screen.blit(title, (24, 16))
+        sub = self.font_sub.render("·  " + self.prompt_label[:80], True, GREY)
+        self.screen.blit(sub, (24 + title.get_width() + 16, 24))
+        brand = self.font_brand.render("drawais", True, LANE_COLORS[0])
+        self.screen.blit(brand, (SCREEN_W - 24 - brand.get_width(), 24))
 
-        # Finish line column (right) — checkered
-        for y in range(14, SCREEN_H, 4):
-            c = 7 if (y // 4) % 2 == 0 else 0
-            pyxel.rect(TRACK_RIGHT + 2, y, 4, 4, c)
-        # Start line (left)
-        pyxel.rect(TRACK_LEFT - 2, 14, 1, SCREEN_H - 14, 5)
+        # Track region
+        track_top = TOP_BAR_H + 16
+        track_bot = track_top + len(self.lanes) * LANE_HEIGHT
+        pygame.draw.rect(self.screen, TRACK, (0, track_top, SCREEN_W, track_bot - track_top))
 
-        # Lanes
+        # Start line
+        pygame.draw.line(self.screen, (255, 255, 255), (TRACK_LEFT - 6, track_top),
+                         (TRACK_LEFT - 6, track_bot), 2)
+        # Finish line — checkered
+        for y in range(track_top, track_bot, 12):
+            for k in range(3):
+                col = WHITE if (((y // 12) + k) % 2 == 0) else (10, 10, 10)
+                pygame.draw.rect(self.screen, col, (TRACK_RIGHT + 4 + k * 8, y, 8, 12))
+
         for i, lane in enumerate(self.lanes):
             self._draw_lane(i, lane)
 
-        # Confetti
-        for x, y, _, _, c in self.confetti:
-            pyxel.pset(int(x), int(y), c)
+        for c in self.confetti:
+            pygame.draw.rect(self.screen, c[4], (int(c[0]), int(c[1]), 4, 4))
 
-        # Winner banner
         if self.winner_id is not None:
             self._draw_winner()
 
     def _lane_y(self, i: int) -> int:
-        top = 18 + i * LANE_HEIGHT
-        return top + LANE_HEIGHT // 2
+        return TOP_BAR_H + 16 + i * LANE_HEIGHT + LANE_HEIGHT // 2
 
     def _draw_lane(self, i: int, lane: LaneState) -> None:
-        top = 18 + i * LANE_HEIGHT
+        top = TOP_BAR_H + 16 + i * LANE_HEIGHT
         mid = top + LANE_HEIGHT // 2
-        # lane stripe
-        pyxel.line(TRACK_LEFT, mid + 6, TRACK_RIGHT, mid + 6, 5)
+        # lane separator
+        pygame.draw.line(self.screen, LANE_LINE, (0, top + LANE_HEIGHT - 1),
+                         (SCREEN_W, top + LANE_HEIGHT - 1), 1)
         # dashed mid line
-        for dx in range(TRACK_LEFT, TRACK_RIGHT, 8):
-            pyxel.line(dx, mid + 6, dx + 4, mid + 6, 13)
-        # Label (model id, left-aligned, small)
-        label = (lane.spec.label or lane.spec.id)[:18]
-        pyxel.text(2, top + 2, label, lane.color)
+        for dx in range(TRACK_LEFT, TRACK_RIGHT, 32):
+            pygame.draw.line(self.screen, LANE_DASH, (dx, mid + 28),
+                             (dx + 16, mid + 28), 2)
+        # Label
+        label_text = self.font_label.render(
+            (lane.spec.label or lane.spec.id)[:24], True, lane.color
+        )
+        self.screen.blit(label_text, (8, top + 8))
 
-        # Sprite x position
         x = TRACK_LEFT + int(lane.progress * TRACK_LEN)
-        # Body
         if lane.error:
-            pyxel.text(x - 4, mid - 2, "X_X", 8)
-            pyxel.text(x - 12, mid + 6, "(error)", 8)
+            err = self.font_label.render("X", True, (255, 80, 80))
+            self.screen.blit(err, (x - 8, mid - 12))
+            sub = self.font_sub.render("(error)", True, (255, 120, 120))
+            self.screen.blit(sub, (x - 24, mid + 16))
             return
-        # Animation phase
-        bob = int((self.frame + i * 7) // 6) % 2
-        # Simple stick-runner: head, body, legs
-        head_y = mid - 8 + (bob if not lane.thinking else 0)
-        body_y = mid - 4
-        feet_y = mid + 1
-        pyxel.circ(x, head_y, 2, lane.color)
-        pyxel.line(x, head_y + 2, x, body_y + 2, lane.color)
+
+        # Sprite — runner with bobbing legs
+        bob = (self.frame // 6 + i * 3) % 2
+        head_y = mid - 22 + (0 if not lane.thinking else 0)
+        # Head
+        pygame.draw.circle(self.screen, lane.color, (x, head_y), 9)
+        # Body
+        pygame.draw.line(self.screen, lane.color, (x, head_y + 9), (x, mid), 4)
         # Arms
-        pyxel.line(x - 3, body_y, x + 3, body_y, lane.color)
-        # Legs alternate
-        if bob == 0:
-            pyxel.line(x, body_y + 2, x - 3, feet_y, lane.color)
-            pyxel.line(x, body_y + 2, x + 2, feet_y, lane.color)
+        if not lane.thinking:
+            arm_offset = 6 if bob == 0 else -6
+            pygame.draw.line(self.screen, lane.color, (x, mid - 8),
+                             (x - 10, mid - 8 + arm_offset), 3)
+            pygame.draw.line(self.screen, lane.color, (x, mid - 8),
+                             (x + 10, mid - 8 - arm_offset), 3)
         else:
-            pyxel.line(x, body_y + 2, x - 2, feet_y, lane.color)
-            pyxel.line(x, body_y + 2, x + 3, feet_y, lane.color)
+            # Arm raised "thinking"
+            pygame.draw.line(self.screen, lane.color, (x, mid - 8),
+                             (x + 10, head_y - 6), 3)
+        # Legs
+        if not lane.thinking:
+            if bob == 0:
+                pygame.draw.line(self.screen, lane.color, (x, mid),
+                                 (x - 8, mid + 14), 4)
+                pygame.draw.line(self.screen, lane.color, (x, mid),
+                                 (x + 6, mid + 14), 4)
+            else:
+                pygame.draw.line(self.screen, lane.color, (x, mid),
+                                 (x - 6, mid + 14), 4)
+                pygame.draw.line(self.screen, lane.color, (x, mid),
+                                 (x + 8, mid + 14), 4)
+        else:
+            pygame.draw.line(self.screen, lane.color, (x, mid),
+                             (x - 6, mid + 14), 4)
+            pygame.draw.line(self.screen, lane.color, (x, mid),
+                             (x + 6, mid + 14), 4)
 
         # Thinking bubble
         if lane.thinking:
-            pyxel.circb(x + 6, head_y - 4, 3, 7)
-            pyxel.text(x + 4, head_y - 6, "?", 7)
+            bx, by = x + 18, head_y - 18
+            pygame.draw.circle(self.screen, WHITE, (bx, by), 14, 2)
+            pygame.draw.circle(self.screen, WHITE, (bx - 14, by + 12), 4, 1)
+            pygame.draw.circle(self.screen, WHITE, (bx - 22, by + 18), 2, 1)
+            qmark = self.font_label.render("?", True, WHITE)
+            self.screen.blit(qmark, (bx - 4, by - 10))
 
-        # Finished checkmark
+        # Finished checkmark — small star
         if lane.finished:
-            pyxel.text(x + 4, mid - 4, "OK", 11)
+            st = self.font_label.render("OK", True, (74, 222, 128))
+            self.screen.blit(st, (x + 14, mid - 12))
 
     def _draw_winner(self) -> None:
-        # Pulsing "WINNER" banner
         if self.race_over_at is None:
             return
-        pulse = (self.frame // 6) % 2
-        c = 10 if pulse == 0 else 14
-        wname = self.winner_id or ""
-        msg = "WINNER: " + wname[:24]
-        bw = len(msg) * 4 + 8
-        bx = (SCREEN_W - bw) // 2
-        by = SCREEN_H // 2 - 8
-        pyxel.rect(bx - 2, by - 2, bw + 4, 16, 0)
-        pyxel.rectb(bx - 2, by - 2, bw + 4, 16, c)
-        pyxel.text(bx + 4, by + 4, msg, c)
+        pulse = 1.0 + 0.15 * math.sin(self.frame * 0.2)
+        msg = "WINNER · " + (self.winner_id or "")
+        text = self.font_winner.render(msg, True, LANE_COLORS[0])
+        w = int(text.get_width() * pulse)
+        h = int(text.get_height() * pulse)
+        scaled = pygame.transform.smoothscale(text, (w, h))
+        x = (SCREEN_W - w) // 2
+        y = (SCREEN_H - h) // 2
+        # backdrop
+        backdrop = pygame.Surface((w + 64, h + 32), pygame.SRCALPHA)
+        backdrop.fill((10, 10, 18, 200))
+        self.screen.blit(backdrop, (x - 32, y - 16))
+        self.screen.blit(scaled, (x, y))

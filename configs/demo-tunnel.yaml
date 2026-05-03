@@ -1,0 +1,16 @@
+title: "build me Snake in Python"
+prompt: |
+  Implement a complete, single-file Snake game in pure Python with pygame.
+  Include scoring, food spawning, game over screen, and arrow-key controls.
+  Output ONLY the full code, no commentary.
+
+runners:
+  - id: qwen3-8b
+    label: "Qwen3-8B AWQ"
+    base_url: http://localhost:8001/v1
+    model: qwen3-8b
+
+  - id: qwen3-4b
+    label: "Qwen3-4B AWQ"
+    base_url: http://localhost:8002/v1
+    model: qwen3-4b
