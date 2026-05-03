@@ -181,12 +181,15 @@ class Arena:
         pygame.quit()
 
     def _mono(self, size: int, bold: bool = False) -> pygame.font.Font:
+        # Try fonts that are likely installed first; only warn if everything
+        # fails. pygame.font.match_font returns None when not installed —
+        # silent check, no UserWarning.
         for name in ("JetBrains Mono", "JetBrainsMono", "Berkeley Mono",
                      "Menlo", "Monaco", "Courier New"):
             try:
-                f = pygame.font.SysFont(name, size, bold=bold)
-                if f is not None:
-                    return f
+                path = pygame.font.match_font(name, bold=bold)
+                if path:
+                    return pygame.font.Font(path, size)
             except Exception:
                 continue
         return pygame.font.Font(None, size)
