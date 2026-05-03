@@ -26,48 +26,35 @@ Plug-and-play with anything that exposes an OpenAI-compatible
 
 ---
 
-## Demo
+## Quickstart (v0.3 web UI)
 
-`recordings/` is auto-populated with an MP4 + thumbnail at the end of each
-race. Drop the file straight on Twitter / r/LocalLLaMA.
-
----
-
-## Install
+> Full step-by-step in [QUICKSTART.md](QUICKSTART.md).
 
 ```bash
-git clone https://github.com/drawais/llm-race
+git clone https://github.com/irjawais/llm-race
 cd llm-race
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
-# OR run without installing:
-uvx --from . llm-race run configs/example.yaml
+
+# see the UI immediately, no LLM needed (synthetic streams)
+llm-race serve configs/demo-synthetic.yaml --target-tokens 1500 --max-tokens 2500
 ```
 
----
+Browser opens on `http://127.0.0.1:8000/`. Three.js scene + SpaceX-style
+telemetry HUD streams over a FastAPI WebSocket.
 
-## Run
+To race **real local models**, point a YAML at any OpenAI-compatible endpoint
+(vLLM, Ollama, LM Studio, llama.cpp, SGLang, MLX-server) and run:
 
-1. Start one or more local LLM servers, each on a different port. Example
-   with vLLM:
+```bash
+llm-race serve my-config.yaml
+```
 
-   ```bash
-   vllm serve drawais/Qwen2.5-Coder-32B-Instruct-AWQ-INT4 --port 8001
-   vllm serve drawais/Qwen2.5-Coder-32B-Instruct-HQQ-INT4 --port 8002
-   ```
+Reasoning models (DeepSeek-R1-Distill, QwQ, Qwen3-thinking) flip the HUD
+badge to `THINK` during `<think>` blocks — the race teaches you that
+*tokens-to-completion* matters more than raw `tok/s`.
 
-2. Edit `configs/example.yaml` to point at those endpoints (`base_url` +
-   `model`).
-
-3. Race:
-
-   ```bash
-   llm-race run configs/awq-vs-hqq.yaml
-   ```
-
-A pyxel game window pops up. Each LLM is a runner on its own lane.
-Reasoning models (DeepSeek-R1-Distill, QwQ) visibly **stop and think**
-during `<think>` blocks — the race teaches you that *tokens-to-completion*
-matters more than raw `tok/s`.
+A legacy pygame window is still available via `llm-race run <config>`.
 
 ---
 
