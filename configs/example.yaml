@@ -1,0 +1,22 @@
+# Example race configuration.
+# Each runner needs an OpenAI-compatible base_url + a model name on that endpoint.
+# Tested with: vLLM, llama.cpp server, Ollama, LM Studio, SGLang, MLX-server.
+
+title: "build me Tetris in Python"
+prompt: |
+  Implement a complete, single-file pure-Python Tetris using pygame.
+  Include hold queue, ghost piece, line-clear animation, and scoring.
+  Output ONLY the full code, no commentary.
+
+runners:
+  - id: qwen2.5-coder-32b-awq
+    label: "Qwen2.5-Coder-32B AWQ"
+    base_url: http://localhost:8001/v1
+    model: drawais/Qwen2.5-Coder-32B-Instruct-AWQ-INT4
+    sprite: runner_purple
+
+  - id: qwen2.5-coder-32b-hqq
+    label: "Qwen2.5-Coder-32B HQQ"
+    base_url: http://localhost:8002/v1
+    model: drawais/Qwen2.5-Coder-32B-Instruct-HQQ-INT4
+    sprite: runner_pink

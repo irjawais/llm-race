@@ -1,0 +1,15 @@
+title: "Coder vs Generalist · same arch, different post-training"
+prompt: |
+  Implement a complete single-file 2048 game in pure Python with pygame.
+  Output the full code only.
+
+runners:
+  - id: qwen2.5-coder-32b
+    label: "Qwen2.5-Coder-32B"
+    base_url: http://localhost:8001/v1
+    model: drawais/Qwen2.5-Coder-32B-Instruct-AWQ-INT4
+
+  - id: qwen2.5-32b
+    label: "Qwen2.5-32B"
+    base_url: http://localhost:8002/v1
+    model: drawais/Qwen2.5-32B-Instruct-AWQ-INT4

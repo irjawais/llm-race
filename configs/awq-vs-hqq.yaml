@@ -1,0 +1,16 @@
+title: "AWQ vs HQQ · same model, two quantization methods"
+prompt: |
+  Implement a complete, single-file Tetris in pure Python with pygame:
+  rendering, controls, scoring, hold queue, ghost piece, line-clear animation.
+  Output the full code only.
+
+runners:
+  - id: qwen2.5-coder-32b-awq
+    label: "Coder-32B AWQ"
+    base_url: http://localhost:8001/v1
+    model: drawais/Qwen2.5-Coder-32B-Instruct-AWQ-INT4
+
+  - id: qwen2.5-coder-32b-hqq
+    label: "Coder-32B HQQ"
+    base_url: http://localhost:8002/v1
+    model: drawais/Qwen2.5-Coder-32B-Instruct-HQQ-INT4
