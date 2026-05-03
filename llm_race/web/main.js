@@ -287,6 +287,7 @@ function buildRunners(meta, target) {
   }
   runners.clear();
   panelsEl.innerHTML = '';
+  panelsEl.dataset.count = String(meta.length);
 
   meta.forEach((m, i) => {
     const lx = laneX(i, meta.length);
