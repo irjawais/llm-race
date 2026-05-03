@@ -1,0 +1,40 @@
+title: "demo · 4 synthetic runners"
+prompt: |
+  Synthesize a Snake game in Python. (synthetic stream — no real LLM call)
+
+runners:
+  - id: alpha
+    label: "Qwen3-8B AWQ"
+    kind: demo
+    base_url: "http://localhost/v1"
+    model: "qwen3-8b"
+    rate_tps: 55
+    jitter: 0.4
+    think_after: 12
+    think_for: 30
+
+  - id: bravo
+    label: "Qwen3-4B AWQ"
+    kind: demo
+    base_url: "http://localhost/v1"
+    model: "qwen3-4b"
+    rate_tps: 78
+    jitter: 0.3
+
+  - id: charlie
+    label: "Qwen3-14B AWQ"
+    kind: demo
+    base_url: "http://localhost/v1"
+    model: "qwen3-14b"
+    rate_tps: 42
+    jitter: 0.45
+    think_after: 8
+    think_for: 60
+
+  - id: delta
+    label: "Qwen3-32B AWQ"
+    kind: demo
+    base_url: "http://localhost/v1"
+    model: "qwen3-32b"
+    rate_tps: 28
+    jitter: 0.35

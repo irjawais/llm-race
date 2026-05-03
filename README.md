@@ -2,10 +2,16 @@
 
 > Watch local LLMs race each other. The comparison **is the game.**
 
-A pixel-art racing game where any number of locally-running LLMs compete on
-the same prompt. Each model is a sprite on its own lane. Tokens streaming in
-push the sprite forward. First model to finish the prompt crosses the finish
-line. **No charts, no numbers — the viewer just sees who's winning.**
+Any number of locally-running LLMs compete on the same prompt. Each model is
+a runner on its own lane. Tokens streaming in push the runner forward. First
+model to finish the prompt crosses the finish line.
+
+**v0.3** (current) ships a Three.js + FastAPI WebSocket browser UI styled as
+a SpaceX Stage-2 telemetry overlay — emissive energy orbs racing on a data
+conduit, T+ clock, per-runner sparklines, leader callout. Runs in any modern
+browser, no npm step.
+
+![hero](recordings/v3-hero.png)
 
 Plug-and-play with anything that exposes an OpenAI-compatible
 `/v1/chat/completions` endpoint:

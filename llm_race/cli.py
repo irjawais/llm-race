@@ -49,6 +49,25 @@ def run(
 
 
 @app.command()
+def serve(
+    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True,
+                                  help="YAML race config (see configs/example.yaml)"),
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8000, "--port", "-P"),
+    target_tokens: int = typer.Option(1024, "--target-tokens", "-t",
+                                      help="Track length in tokens — orb crosses finish line at this count"),
+    max_tokens: int = typer.Option(8192, "--max-tokens"),
+    no_browser: bool = typer.Option(False, "--no-browser",
+                                    help="Skip auto-opening the browser"),
+) -> None:
+    """v0.3 — Three.js + WebSocket web UI. Starts FastAPI and opens the browser."""
+    from llm_race.server import serve as _serve
+    _serve(config, host=host, port=port,
+           target_tokens=target_tokens, max_tokens=max_tokens,
+           open_browser=not no_browser)
+
+
+@app.command()
 def version() -> None:
     """Print version."""
     from llm_race import __version__

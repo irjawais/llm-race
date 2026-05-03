@@ -13,3 +13,4 @@ dist/
 recordings/*.mp4
 recordings/*.gif
 !recordings/.gitkeep
+.serve_smoke.log

@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>llm-race · telemetry</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <header class="hud-header">
+    <div class="brand">
+      <span class="dot"></span>
+      <span class="brand-name">LLM·RACE</span>
+      <span class="brand-sep">/</span>
+      <span class="brand-mission" id="mission-title">— · TELEMETRY</span>
+    </div>
+    <div class="clock">
+      <span class="label">T+</span>
+      <span class="value" id="clock">00:00:00.0</span>
+    </div>
+    <div class="status">
+      <span class="dot pulse" id="status-dot"></span>
+      <span id="status-text">CONNECTING</span>
+    </div>
+  </header>
+
+  <aside class="hud-panels" id="hud-panels"></aside>
+
+  <div class="hud-leader" id="leader-callout" hidden>
+    <span class="label">LEAD</span>
+    <span class="value" id="leader-name">—</span>
+    <span class="delta" id="leader-delta">+0 TOK</span>
+  </div>
+
+  <footer class="hud-footer">
+    <div class="ft-row">
+      <span class="label">PROMPT</span>
+      <span class="value" id="prompt-text">—</span>
+    </div>
+    <div class="ft-row">
+      <span class="label">TARGET</span>
+      <span class="value" id="target-text">— TOK</span>
+      <span class="sep">·</span>
+      <span class="label">MODE</span>
+      <span class="value">CHASE-CAM</span>
+      <span class="sep">·</span>
+      <span class="label">FPS</span>
+      <span class="value" id="fps-text">—</span>
+    </div>
+  </footer>
+
+  <div class="finish-overlay" id="finish-overlay" hidden>
+    <div class="finish-card">
+      <div class="finish-tag">FINISH · STAGE 1 SEPARATION</div>
+      <div class="finish-name" id="finish-name">—</div>
+      <div class="finish-stats" id="finish-stats">— tok/s avg · — s</div>
+    </div>
+  </div>
+
+  <script type="module" src="/static/main.js"></script>
+</body>
+</html>
